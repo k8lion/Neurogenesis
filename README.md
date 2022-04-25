@@ -1,4 +1,8 @@
 # Neurogenesis
+## Code navigation
+The main script for training a growing neural network is found in `exp/runneurogenesis.jl`. This script accepts command line arguments, detailed in `exp/utilities.jl`, such as the trigger and initialization strategies, base architecture, dataset, and hyperparameters. Models and basic operations are defined in `src/models.jl`. Trigger scoring functions are defined in `src/scores.jl`. Initialization functions are defined `src/initializations.jl`.
+
+## Running experiments
 
 0. If you do not have Julia >= 1.6.0, [download and install Julia](https://julialang.org/downloads/) and add it to your `PATH`.
 

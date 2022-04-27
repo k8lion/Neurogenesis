@@ -134,9 +134,13 @@ function optorthogact(m::NeuroSearchSpace, layer::Int, x::AbstractArray, tries::
         x = m(x, depth=layer-1)
     end
     currindices = getactiveindices(m.model[layer])
-    if isa(m.model[layer], NeuroVertexConv)
+    if !isa(m.model[layer], NeuroVertexDense)
         trimmed_x = x[:,:,getactiveinputindices(m.model[layer]),:] 
-        curracts = flatten(m.model[layer](x)[:,:,currindices, :])
+        if isa(m.model[layer], NeuroVertexConv)
+            curracts = flatten(m.model[layer](x)[:,:,currindices, :])
+        else
+            curracts = flatten(m.model[layer].layers[1](x)[:,:,currindices, :])
+        end
     else
         trimmed_x = flatten(x)[getactiveinputindices(m.model[layer]),:] 
         curracts = m.model[layer](x)[currindices, :]
@@ -145,12 +149,17 @@ function optorthogact(m::NeuroSearchSpace, layer::Int, x::AbstractArray, tries::
     currmeannorm = meannorm(m.model[layer])
     neuronwidth = size(currweights)[2]
     opt = ADAM()
-    if isa(m.model[layer], NeuroVertexConv)
+    if !isa(m.model[layer], NeuroVertexDense)
         faninweights = glorot_uniform(tries, neuronwidth, neuronwidth, size(curracts)[2]+1, rng) |> f32 |> device
-        σ, mp = m.model[layer].layer.σ, m.model[layer].maxpool
-        W = reshape(faninweights, size(m.model[layer].layer.weight)[1:2]..., :, tries)
+        if isa(m.model[layer], NeuroVertexSequence)
+            mlayer = m.model[layer].layers[1]
+        else
+            mlayer = m.model[layer]
+        end
+        σ, mp = mlayer.layer.σ, mlayer.maxpool
+        W = reshape(faninweights, size(mlayer.layer.weight)[1:2]..., :, tries)
         W .*= currmeannorm./vecnorm(W, (1,2,3)) 
-        cdims = DenseConvDims(trimmed_x, W; stride = m.model[layer].layer.stride, padding = m.model[layer].layer.pad, dilation = m.model[layer].layer.dilation, groups = m.model[layer].layer.groups)
+        cdims = DenseConvDims(trimmed_x, W; stride = mlayer.layer.stride, padding = mlayer.layer.pad, dilation = mlayer.layer.dilation, groups = mlayer.layer.groups)
         if steps > 0
             pW = params(W)
             for _ in 1:steps
@@ -199,7 +208,7 @@ function optorthogact(m::NeuroSearchSpace, layer::Int, x::AbstractArray, tries::
     end
     tokeeps = sortperm(scores,rev=true)[1:toadd]
     newindices = getinactiveindices(m.model[layer], toadd)
-    unmaskneuron(m.model[layer], faninweights[tokeeps,:], newindices, true)
+    unmaskneuron(m.model[layer], faninweights[tokeeps,:], newindices, true, rng)
     if ndims(Wb(m.model[layer])[1]) != ndims(Wb(m.model[layer+1])[1])
         kernel = prod(m.conversion)
         unmaskoutputs(m.model[layer+1], vcat([collect((neuron-1)*kernel+1:neuron*kernel) for neuron in newindices]...), zero_init, rng, false)
@@ -232,7 +241,7 @@ function addorthogact(m::NeuroSearchSpace, layer::Int, x::AbstractArray, tries::
     newindices = getinactiveindices(m.model[layer], tries)
     scores = zeros(length(newindices))
     for (i,new_index) in enumerate(newindices) 
-        unmaskneuron(m.model[layer], weights[:,i], new_index, true) 
+        unmaskneuron(m.model[layer], weights[:,i], new_index, true, rng) 
         if layer+1 <= length(m.model)
             if ndims(Wb(m.model[layer])[1]) != ndims(Wb(m.model[layer+1])[1])
                 kernel = prod(m.conversion)
@@ -268,37 +277,42 @@ function noisycopyneuron(m::NeuroSearchSpace, i::Int, lossf, x, y, tries::Int = 
     else
         oldW = copy(Wmasked(m.model[i], true, true, false, false, true))
     end
+    if !isa(m.model[i+1], NeuroVertexSequence)
+        nextlayer = m.model[i+1]
+    else
+        nextlayer = m.model[i+1].layers[1]
+    end
     newindices = getinactiveindices(m.model[i], tries)
-    nextactives = getactiveindices(m.model[i+1])
+    nextactives = getactiveindices(nextlayer)
     noises = rand(rng, size(oldW[newindices,:])...).*2f0 .-1f0
     tocopys = sort(sample(rng,actives,min(floor(Int,length(newindices)*copyratio), length(actives)),replace=false))
     for (j, newindex) in enumerate(newindices)
         if j <= length(tocopys)
             noises[j,:]*=ϵ*vecnorm(oldW[tocopys[j],:])
             faninweights = oldW[tocopys[j],:].+noises[j,:]
-            unmaskneuron(m.model[i], faninweights, newindex, false)
+            unmaskneuron(m.model[i], faninweights, newindex, false, rng)
         else
             faninweights = noises[j,:]
-            unmaskneuron(m.model[i], faninweights, newindex, true)
+            unmaskneuron(m.model[i], faninweights, newindex, true, rng)
         end
         if i < length(m.model)
             if j <= length(tocopys)
-                scaleweights(m.model[i+1], nextactives, tocopys[j], 5f-1)
-                fanoutweights = Wmasked(m.model[i+1], true, false, true, true, false)[:, tocopys[j]]
+                scaleweights(nextlayer, nextactives, tocopys[j], 5f-1)
+                fanoutweights = Wmasked(nextlayer, true, false, true, true, false)[:, tocopys[j]]
             else
                 numweights = length(nextactives)
-                if isa(m.model[i+1], NeuroVertexConv)
-                    numweights *= prod(size(Wb(m.model[i+1])[1])[1:2])
+                if isa(nextlayer, NeuroVertexConv)
+                    numweights *= prod(size(Wb(nextlayer)[1])[1:2])
                 end
-                fanoutweights = randn(Float32, numweights)*ϵ*meannorm(m.model[i+1], false)
+                fanoutweights = randn(Float32, numweights)*ϵ*meannorm(nextlayer, false)
             end
-            if ndims(Wb(m.model[i])[1]) != ndims(Wb(m.model[i+1])[1])
+            if ndims(Wb(m.model[i])[1]) != ndims(Wb(nextlayer)[1])
                 kernel = prod(m.conversion)
                 for n in (newindex-1)*kernel+1:newindex*kernel
-                    unmaskoutputs(m.model[i+1], fanoutweights, n) #[1+(ind-1)*kernel:ind*kernel]
+                    unmaskoutputs(nextlayer, fanoutweights, n) #[1+(ind-1)*kernel:ind*kernel]
                 end
             else
-                unmaskoutputs(m.model[i+1], fanoutweights, newindex)
+                unmaskoutputs(nextlayer, fanoutweights, newindex)
             end
         end
     end
@@ -317,20 +331,27 @@ function noisycopyneuron(m::NeuroSearchSpace, i::Int, lossf, x, y, tries::Int = 
     sortedgn = sortperm(vec(gradnorms), rev=true)
     tokeep = sortedgn[1:toadd]
     toremove = sortedgn[toadd+1:end]
-    assignweights(m.model[i], tocopys, inputactives, copy(transpose(oldW[tocopys,:])|> device))
+    if length(tocopys) > 0
+        assignweights(m.model[i], tocopys, inputactives, copy(transpose(oldW[tocopys,:])|> device))
+    end
     addweights(m.model[i], tocopys[tokeep[tokeep .<= length(tocopys)]], inputactives, -noises[tokeep[tokeep .<= length(tocopys)],:])
     scaleweights(m.model[i], newindices[toremove], inputactives, 0f0)
     maskneuron(m.model[i], newindices[toremove])
     if i < length(m.model)
-        scaleweights(m.model[i+1], nextactives, tocopys[toremove[toremove .<= length(tocopys)]], 2f0)    
-        if ndims(Wb(m.model[i])[1]) != ndims(Wb(m.model[i+1])[1])
+        if length(tocopys) > 0
+            scaleweights(nextlayer, nextactives, tocopys[toremove[toremove .<= length(tocopys)]], 2f0)   
+        end 
+        if ndims(Wb(m.model[i])[1]) != ndims(Wb(nextlayer)[1])
             kernel = prod(m.conversion)
-            maskoutputs(m.model[i+1], vcat([collect((neuron-1)*kernel+1:neuron*kernel) for neuron in newindices[toremove]]...))
+            maskoutputs(nextlayer, vcat([collect((neuron-1)*kernel+1:neuron*kernel) for neuron in newindices[toremove]]...))
         else
-            maskoutputs(m.model[i+1], newindices[toremove])
+            maskoutputs(nextlayer, newindices[toremove])
         end
     end
-    return newindices[tokeep], tocopys[tokeep[tokeep .<= length(tocopys)]]
+    if length(tocopys) > 0
+        return newindices[tokeep], tocopys[tokeep[tokeep .<= length(tocopys)]]
+    end
+    return newindices[tokeep], []
 end
 
 function nestconvneuron(m::NeuroSearchSpace, i::Int, lossf, x, y, tries::Int = 1, device = cpu, rng = GLOBAL_RNG, toadd::Int = 1)
@@ -348,7 +369,7 @@ function nestconvneuron(m::NeuroSearchSpace, i::Int, lossf, x, y, tries::Int = 1
     for (j, newindex) in enumerate(newindices)
         faninweights = vec(faninnoises[j,:])
         fanoutweights = vec(fanoutnoises[j,:])
-        unmaskneuron(m.model[i], faninweights, newindex, true)
+        unmaskneuron(m.model[i], faninweights, newindex, true, rng)
         if ndims(Wb(m.model[i])[1]) != ndims(Wb(m.model[i+1])[1])
             kernel = prod(m.conversion)
             for n in (newindex-1)*kernel+1:newindex*kernel
@@ -369,7 +390,7 @@ function nestconvneuron(m::NeuroSearchSpace, i::Int, lossf, x, y, tries::Int = 1
         end
     end
     tokeep = sortperm(losses)[1:toadd]
-    unmaskneuron(m.model[i], faninnoises[tokeep,:], newindices[tokeep], true)
+    unmaskneuron(m.model[i], faninnoises[tokeep,:], newindices[tokeep], true, rng)
     if ndims(Wb(m.model[i])[1]) != ndims(Wb(m.model[i+1])[1])
         kernel = prod(m.conversion)
         unmaskoutputs(m.model[i+1], fanoutnoises[tokeep,:], vcat([collect((neuron-1)*kernel+1:neuron*kernel) for neuron in newindices[tokeep]]...), true) 
@@ -389,7 +410,6 @@ function auxgradpatches(grad::AbstractArray, device, outkernel=(3,3), stride=(1,
     end
     filter = reshape(filter, outkernel..., 1, prod(outkernel)*size(grad,4))
     filterlayer = Conv(identity, filter, Flux.Zeros(), stride, (0,0), (1,1), size(grad,4)) |> device
-    @show size(permutedims(grad, (1,2,4,3))), size(filterlayer.weight), filterlayer.groups
     output = filterlayer(permutedims(grad, (1,2,4,3)))
     #output: k1 X k1 X (m2*k2*k2) X m0
     expanded = permutedims(reshape(output, size(output)[1:2]..., outkernel...,:,size(output,4))[:,:,end:-1:1,end:-1:1,:,:],(1,2,5,4,3,6)) #expanded
@@ -403,7 +423,7 @@ function gradmaxneuron(m::NeuroSearchSpace, i::Int, x::AbstractArray, y::Abstrac
     grad, = gradient(auxw -> lossf(m,i,auxw,x,y), m.auxs[i]) 
     fanin = getactiveinputindices(m.model[i])
     fanout = getactiveindices(m.model[i+1])
-    if isa(m.model[i], NeuroVertexConv)
+    if !isa(m.model[i], NeuroVertexDense)
         if isa(m.model[i+1], NeuroVertexDense)
             gradfilt = auxgradpatches(grad[:,:,fanin,fanout], device, (1,1))
         else
@@ -416,7 +436,6 @@ function gradmaxneuron(m::NeuroSearchSpace, i::Int, x::AbstractArray, y::Abstrac
     allweights = copy(U[:,1:toadd]') #TODO: make sure this works for conv case
     newindices = getinactiveindices(m.model[i], toadd)
     unmaskneuron(m.model[i], newindices, zero_init, rng)
-    @show size(allweights), size(U)
     unmaskoutputs(m.model[i+1], allweights |> device, newindices, true)
     return newindices
 end
@@ -452,7 +471,7 @@ function nestneuron(m::NeuroSearchSpace, i::Int, x, y, lossf, beta::Float32 = 1f
             end
         end
     end
-    unmaskneuron(m.model[i], win, newindices, true)
+    unmaskneuron(m.model[i], win, newindices, true, rng)
     unmaskoutputs(m.model[i+1], wout, newindices, true)
     return newindices
 end
@@ -476,8 +495,8 @@ function nestneuron(m::NeuroSearchSpace, i::Int, grad::AbstractMatrix, beta::Flo
             end
         end
     end
-    unmaskneuron(m.model[i], win, newindices, true)
-    unmaskoutputs(m.model[i+1], wout, newindices, true)
+    unmaskneuron(m.model[i], win, newindices, true, rng)
+    unmaskoutputs(m.model[i+1], wout, newindices, true, rng)
     return newindices
 end
 

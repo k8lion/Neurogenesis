@@ -27,6 +27,8 @@ function ng(args)
             otherrng = MersenneTwister(abs(rand(Int)))
             if args["vgg"]
                 name = "vgg"
+            elseif args["wrn"]
+                name = "wrn"
             elseif args["conv"]
                 name = "conv"
             else
@@ -37,7 +39,7 @@ function ng(args)
                 args["datadir"] = nothing
             end
             datadir = args["datadir"]
-            folder = joinpath(string("outputs/ng", args["dataset"]), args["expdir"], string(trigger, "_", init), args["name"])
+            folder = joinpath(string("test/plots/ng", args["dataset"], args["vgg"] ? "vgg" : "", args["wrn"] ? "wrn" : ""), args["expdir"], string(trigger, "_", init), args["name"])
             if isfile(joinpath(folder, "logs.bson")) & (args["expdir"] != "test")
                 return
             end
@@ -135,9 +137,9 @@ function ng(args)
                 input = size(first(trainDL)[1])[1:3]
             end
 
-            if !args["vgg"]
+            if !args["vgg"] && !args["wrn"]
                 init_hiddens = ones(Int, args["hidden"]) .* init_hidden
-                init_hiddens_ = init_hiddens #0*init_hiddens.+1
+                init_hiddens_ = init_hiddens
                 max_hiddens = ones(Int, args["hidden"]) .* max_hidden
                 if args["conv"]
                     max_hiddens[1:2] .= 32
@@ -161,7 +163,7 @@ function ng(args)
                     max_hiddens[lastfix:end] .= args["staticwidth"]
                     tries = ones(Int, length(init_hiddens)) .* args["densetries"]
                 end
-            else
+            elseif args["vgg"]
                 defaultstatic = [64, 128, 256, 256, 512, 512, 512, 512, 4096, 4096] 
                 if args["trigger"] == STATIC
                     init_hiddens_ = defaultstatic
@@ -186,10 +188,45 @@ function ng(args)
                     max_hiddens = defaultstatic * 2
                 end
                 max_hidden = maximum([512*2+args["convtries"], 4096*2+args["densetries"]])
+            elseif args["wrn"]
+                if args["intergrowth"]
+                    defaultstatic = vcat([16 for _ in 1:4],[32 for _ in 1:4],[64 for _ in 1:4]) 
+                else
+                    defaultstatic = [16, 16, 32, 64]
+                end
+                if args["trigger"] == STATIC
+                    init_hiddens_ = defaultstatic .* args["initmultiplier"]
+                    init_hiddens = init_hiddens_
+                    tries = zeros(Int, length(init_hiddens_))
+                    max_hiddens = init_hiddens_
+                elseif args["trigger"] == BIGSTATIC
+                    init_hiddens_ = defaultstatic .* args["maxwidth"]
+                    init_hiddens = init_hiddens_
+                    tries = zeros(Int, length(init_hiddens_))
+                    max_hiddens = init_hiddens_
+                elseif args["trigger"] == SMALLSTATIC
+                    init_hiddens_ = floor.(Int, defaultstatic ./ 4)
+                    init_hiddens = init_hiddens_
+                    tries = zeros(Int, length(init_hiddens_))
+                    max_hiddens = init_hiddens_
+                else
+                    init_hiddens_ = floor.(Int, defaultstatic ./ 4)
+                    init_hiddens = init_hiddens_
+                    tries = ones(Int, length(init_hiddens_)) .* args["convtries"]
+                    max_hiddens = defaultstatic .* args["maxwidth"]
+                end
+                max_hidden = 64 .* args["maxwidth"] + args["convtries"]
             end
+            @show init_hiddens_
+            @show max_hiddens
+            @show max_hidden
 
             if args["vgg"]
-                m = NeuroSearchSpaceVGG11(args["initmultiplier"], input, classes, tries)
+                m = NeuroSearchSpaceVGG11(args["initmultiplier"], input, classes, tries, false, false, gmrelu)
+                [@show countactiveneurons(m.model[i]) for i in 1:length(max_hiddens)]
+            elseif args["wrn"]
+                m = NeuroSearchSpaceWRN28(args["initmultiplier"], max_hiddens.+tries, input, classes, args["skipscale"], false, true, gmrelu)
+
             elseif args["conv"]
                 m = NeuroSearchSpace(max_hiddens .+ tries, init_hiddens_, input, classes, [(5, 5), (5, 5), (-1, -1), (-1, -1), (-1, -1)], args["bias"], gmrelu) |> f32
             else
@@ -226,10 +263,10 @@ function ng(args)
                             break
                         end
                     end
-                    m(xs.data, saveacts=saveacts)
+                    m(xs.data, saveacts=saveacts, skips=false)
                 else
                     for (x,_) in trainDL
-                        m(x, saveacts=saveacts)
+                        m(x, saveacts=saveacts, skips=false)
                         x = nothing
                         break
                     end
@@ -241,6 +278,10 @@ function ng(args)
                 initial_orthos = [countsvd(Wmasked(m.model[i], true, true, false, true, true))/countactiveneurons(m.model[i])*args["svdthreshold"] for i in 1:args["hidden"]]
             end
             batch = 1
+            if trigger in statics
+                push!(allcounts, countparams(m))
+                @show countparams(m)
+            end
             for epoch in 1:epochs
                 if device == gpu
                     shuffle!(trainDL.batches)
@@ -267,172 +308,179 @@ function ng(args)
 
                     push!(allloss, train_loss)
                     [push!(allactives[i], countactiveneurons(m.model[i])) for i in 1:length(max_hiddens)]
-                    push!(allcounts, countparams(m))
-                    trigtimeCPU = @CPUelapsed begin
-                        trigtime = @myelapsed device begin 
-                            if trigger == GSVDC
-                                Ws = params([m.model[i].layer.weight for i in 1:length(m.model)])
-                                push!(allgradnorm, norm(gs[W] for W in Ws))
-                                gradnorms = [gradnorm(m, i, gs[Ws[i]], gs[Ws[i+1]]) for i in 1:length(m.model)-1]
-                            elseif trigger == SVDACTS && device == cpu
-                                m(xs.data, saveacts=saveacts)
-                            end
-                            if device == gpu
-                                ps = nothing
-                                gs = nothing
-                                Ws = nothing
-                                GC.gc()
-                                CUDA.reclaim()
-                            end
-                            if trigger == GSVDC
-                                grad, = gradient(auxs -> Flux.logitcrossentropy(m(auxs, x), y), m.auxs) #|> cpu
-                            end
-                        end
-                    end
-                    for i in 1:length(max_hiddens)
-                        trigtimeCPU += @CPUelapsed begin
-                            trigtime += @myelapsed device begin 
-                                trig = false
-                                toadd = 1
+                    if !(trigger in statics)
+
+                        push!(allcounts, countparams(m))
+                        trigtimeCPU = @CPUelapsed begin
+                            trigtime = @myelapsed device begin 
+                                if trigger == GSVDC
+                                    Ws = params([getweights(m.model[i]) for i in 1:length(m.model)])
+                                    push!(allgradnorm, norm(gs[W] for W in Ws))
+                                    gradnorms = [gradnorm(m, i, gs[Ws[i]], gs[Ws[i+1]]) for i in 1:length(m.model)-1]
+                                elseif trigger == SVDACTS
+                                    if device == cpu
+                                        m(xs.data, saveacts=saveacts)
+                                    else
+                                        m(x, saveacts=saveacts, skips=false)
+                                    end
+                                end
                                 if device == gpu
+                                    ps = nothing
+                                    gs = nothing
+                                    Ws = nothing
                                     GC.gc()
                                     CUDA.reclaim()
                                 end
-                                if trigger == SVDACTS
-                                    actives = getactiveindices(m.model[i])
-                                    scorea = orthogscore(m.acts.currentacts[i], orthog, actives)
-                                    push!(allscores[i], scorea)
-                                    if args["svdinit"]
-                                        svd_thresholds[i] = floor(Int, initial_orthos[i] * length(actives))
-                                        if args["vgg"] && scorea/length(actives)*args["svdthreshold"] > initial_orthos[i]
-                                            initial_orthos[i] = scorea/length(actives)*args["svdthreshold"]
-                                        end
-                                    else
-                                        svd_thresholds[i] = floor(Int, args["svdthreshold"] * length(actives))
-                                    end
-                                    push!(allthresholds[i], svd_thresholds[i]) 
-                                    trig = (scorea > svd_thresholds[i])
-                                    toadd = floor(Int, scorea - svd_thresholds[i])
-                                elseif trigger == SVDWEIGHTS
-                                    scorew = countsvd(Wmasked(m.model[i], true, true, false, true, true))
-                                    push!(allscores[i], scorew)
-                                    if args["svdinit"]
-                                        svd_thresholds[i] = floor(Int, initial_orthos[i] * length(getactiveindices(m.model[i])))
-                                        if args["vgg"] && scorew/length(getactiveindices(m.model[i]))*args["svdthreshold"] > initial_orthos[i]
-                                            initial_orthos[i] = scorew/length(getactiveindices(m.model[i]))*args["svdthreshold"]
-                                        end
-                                    else
-                                        svd_thresholds[i] = floor(Int, args["svdthreshold"] * length(getactiveindices(m.model[i])))
-                                    end
-                                    push!(allthresholds[i], svd_thresholds[i])
-                                    trig = (scorew > svd_thresholds[i])
-                                    toadd = floor(Int, scorew - svd_thresholds[i])
-                                elseif trigger == GSVDC
-                                    fanin = getactiveinputindices(m.model[i])
-                                    fanout = getactiveindices(m.model[i+1])
-                                    if ndims(grad[i]) == 2
-                                        gradi = grad[i][fanout, fanin]
-                                    else
-                                        gradi = auxgradpatches(grad[i][:,:,fanin,fanout], device)
-                                    end
-                                    U, S, _ = svd(gradi)
-                                    scorec = cpu(S)[1]
-                                    push!(allscores[i], scorec)
-                                    scoreg = sum(gradnorms[i])/2#max(maximum(gradnorms[i]), mean(gradnorms[i])+2*std(gradnorms[i])) #2*maximum(gradnorms[i])
-                                    push!(allthresholds[i], scoreg)
-                                    trig = (scorec >= scoreg)
-                                    toadd = min(sum(S .>= scoreg), size(U)[2])
-                                    if device == gpu
-                                        S = nothing
-                                        grad[i] = similar(grad[i], 0, 0)
-                                        if init !== NEST
-                                            gradi = nothing
-                                        elseif init !== GRADMAX
-                                            U = nothing
-                                        end
-                                    end
-                                elseif trigger == RANDOMTRIG
-                                    trig = (rand(otherrng) > (xaxis[end] / epochs)) & (countactiveneurons(m.model[i]) < (xaxis[end] / epochs * max_hiddens[i]))
-                                    toadd = 1
-                                elseif trigger == LINEAR
-                                    trig = (allactives[i][batch] < (defaultstatic[i] - init_hiddens_[i]) * xaxis[end] / (epochs * args["endpreset"]) + init_hiddens_[i]) & (allactives[i][batch] < defaultstatic[i])
-                                    toadd = 1
-                                elseif trigger == FASTLINEAR
-                                    trig = (allactives[i][batch] < defaultstatic[i])
-                                    toadd = 1
-                                elseif trigger == BATCHED
-                                    stage = floor(Int, floor(Int, ( 8*xaxis[end] / (epochs * args["endpreset"])))*(defaultstatic[i] - init_hiddens_[i])/8) + init_hiddens_[i]
-                                    toadd = max(0, floor(Int, (defaultstatic[i] - init_hiddens_[i])/8))
-                                    trig = (allactives[i][batch] < stage) && (allactives[i][batch] + toadd <= defaultstatic[i]) && toadd > 0
-                                    if init == GRADMAX
-                                        toadd = min(toadd, length(getactiveinputindices(m.model[i])), length(getactiveindices(m.model[i+1])), stage-allactives[i][batch])
-                                    end
+                                if trigger == GSVDC
+                                    grad, = gradient(auxs -> Flux.logitcrossentropy(m(auxs, x), y), m.auxs) #|> cpu
                                 end
-                                toadd = min(toadd, max_hiddens[i]-countactiveneurons(m.model[i]))
                             end
                         end
-
-                        if (trig) & (countactiveneurons(m.model[i]) < max_hiddens[i]) & (i > args["fix"]) & (i < lastfix) & (toadd > 0)
-                            inittimeCPU = @CPUelapsed begin
-                                inittime = @myelapsed device begin 
-                                    copied = []
+                        for i in 1:length(max_hiddens)
+                            trigtimeCPU += @CPUelapsed begin
+                                trigtime += @myelapsed device begin 
+                                    trig = false
+                                    toadd = 1
                                     if device == gpu
                                         GC.gc()
                                         CUDA.reclaim()
                                     end
-                                    if init == RANDOMIN #random in, zero out
-                                        newindices = getinactiveindices(m.model[i], toadd)
-                                        unmaskneuron(m, i, newindices, Neurogenesis.glorot_uniform, otherrng, true)
-                                        if i + 1 <= length(m.model)
-                                            unmaskoutputs(m.model[i+1], newindices, Neurogenesis.zero_init, otherrng, false)
-                                        end
-                                    elseif init == RANDOMOUT #zero in, random out
-                                        newindices = randomoutneuron(m, i, otherrng, toadd)
-                                    elseif init == GRADMAX   #zero in, directly max grad-norm out
-                                        if trig == GSVDC
-                                            newindices = gradmaxneuron(m, i, U, device, otherrng, toadd)
-                                        else
-                                            newindices = gradmaxneuron(m, i, x, y, auxloss, device, otherrng, toadd)
-                                        end
-                                    elseif init == NEST #gradient based in and out
-                                        if isa(m.model[i], Neurogenesis.NeuroVertexDense)
-                                            if trig == GSVDC
-                                                newindices = nestneuron(m, i, cpu(gradi), 4.0f-1, otherrng, toadd)
-                                            else
-                                                newindices = nestneuron(m, i, x, y, auxloss, 4.0f-1, device, otherrng, toadd)
+                                    if trigger == SVDACTS
+                                        actives = getactiveindices(m.model[i])
+                                        scorea = orthogscore(m.acts.currentacts[i], orthog, actives)
+                                        push!(allscores[i], scorea)
+                                        if args["svdinit"]
+                                            svd_thresholds[i] = floor(Int, initial_orthos[i] * length(actives))
+                                            if (args["vgg"] || args["wrn"]) && scorea/length(actives)*args["svdthreshold"] > initial_orthos[i]
+                                                initial_orthos[i] = scorea/length(actives)*args["svdthreshold"]
                                             end
                                         else
-                                            newindices = nestconvneuron(m, i, (m, x, y) -> Flux.logitcrossentropy(m(x), y), x, y, tries[i]+toadd, device, otherrng, toadd)
+                                            svd_thresholds[i] = floor(Int, args["svdthreshold"] * length(actives))
                                         end
-                                    elseif init == FIREFLY #copy+noise in, half copy out
-                                        newindices, copied = noisycopyneuron(m, i, (m, x, y) -> Flux.logitcrossentropy(m(x), y), x, y, tries[i]+toadd, args["eps"], 5.0f-1, device, otherrng, toadd)
-                                    elseif init == ORTHOGACT #guess+check max orthog-act in, zero out
-                                        if isa(m.model[i], Neurogenesis.NeuroVertexConv) #for speed
-                                            newindices = initneuron(m, i, tries[i]+toadd, xsdata, orthog, otherrng, toadd)
+                                        push!(allthresholds[i], svd_thresholds[i]) 
+                                        trig = (scorea > svd_thresholds[i])
+                                        toadd = floor(Int, scorea - svd_thresholds[i])
+                                    elseif trigger == SVDWEIGHTS
+                                        scorew = countsvd(Wmasked(m.model[i], true, true, false, true, true))
+                                        push!(allscores[i], scorew)
+                                        if args["svdinit"]
+                                            svd_thresholds[i] = floor(Int, initial_orthos[i] * length(getactiveindices(m.model[i])))
+                                            if (args["vgg"] || args["wrn"]) && scorew/length(getactiveindices(m.model[i]))*args["svdthreshold"] > initial_orthos[i]
+                                                initial_orthos[i] = scorew/length(getactiveindices(m.model[i]))*args["svdthreshold"]
+                                            end
                                         else
-                                            newindices = optorthogact(m, i, xsdata, tries[i]+toadd, 0, orthog, device, otherrng, toadd)
+                                            svd_thresholds[i] = floor(Int, args["svdthreshold"] * length(getactiveindices(m.model[i])))
                                         end
-                                    elseif init == ORTHOGWEIGHTS #directly max orthog-weights in, zero out
-                                        newindices = getinactiveindices(m.model[i], toadd)
-                                        unmaskneuron(m.model[i], newindices, Neurogenesis.orthogonal_init, otherrng, true)
-                                        if i + 1 <= length(m.model)
-                                            unmaskoutputs(m.model[i+1], newindices, Neurogenesis.zero_init, otherrng, false)
+                                        push!(allthresholds[i], svd_thresholds[i])
+                                        trig = (scorew > svd_thresholds[i])
+                                        toadd = floor(Int, scorew - svd_thresholds[i])
+                                    elseif trigger == GSVDC
+                                        fanin = getactiveinputindices(m.model[i])
+                                        fanout = getactiveindices(m.model[i+1])
+                                        if ndims(grad[i]) == 2
+                                            gradi = grad[i][fanout, fanin]
+                                        else
+                                            gradi = auxgradpatches(grad[i][:,:,fanin,fanout], device)
                                         end
-                                    elseif (init == SOLVEORTHOGACT) #directly max orthog pre-act in, zero out
-                                        newindices = addorthogact(m, i, xsdata, tries[i]+toadd, orthog, otherrng, toadd) # length(getinactiveindices(m.model[1])
-                                    elseif init == OPTORTHOGACT #use gradient descent to find weights that optimize orthogonality of act
-                                        newindices = optorthogact(m, i, xsdata, floor(Int, tries[i]/10)+toadd, floor(Int, tries[i]/10), orthog, device, otherrng, toadd)
+                                        U, S, _ = svd(gradi)
+                                        scorec = cpu(S)[1]
+                                        push!(allscores[i], scorec)
+                                        scoreg = sum(gradnorms[i])/2
+                                        push!(allthresholds[i], scoreg)
+                                        trig = (scorec >= scoreg)
+                                        toadd = min(sum(S .>= scoreg), size(U)[2])
+                                        if device == gpu
+                                            S = nothing
+                                            #grad[i] = similar(grad[i], 0, 0)
+                                            if init !== NEST
+                                                gradi = nothing
+                                            elseif init !== GRADMAX
+                                                U = nothing
+                                            end
+                                        end
+                                    elseif trigger == RANDOMTRIG
+                                        trig = (rand(otherrng) > (xaxis[end] / epochs)) & (countactiveneurons(m.model[i]) < (xaxis[end] / epochs * max_hiddens[i]))
+                                        toadd = 1
+                                    elseif trigger == LINEAR
+                                        trig = (allactives[i][batch] < (defaultstatic[i] - init_hiddens_[i]) * xaxis[end] / (epochs * args["endpreset"]) + init_hiddens_[i]) & (allactives[i][batch] < defaultstatic[i])
+                                        toadd = 1
+                                    elseif trigger == FASTLINEAR
+                                        trig = (allactives[i][batch] < defaultstatic[i])
+                                        toadd = 1
+                                    elseif trigger == BATCHED
+                                        stage = floor(Int, floor(Int, ( 8*xaxis[end] / (epochs * args["endpreset"])))*(defaultstatic[i] - init_hiddens_[i])/8) + init_hiddens_[i]
+                                        toadd = max(0, floor(Int, (defaultstatic[i] - init_hiddens_[i])/8))
+                                        trig = (allactives[i][batch] < stage) && (allactives[i][batch] + toadd <= defaultstatic[i]) && toadd > 0
+                                        if init == GRADMAX
+                                            toadd = min(toadd, length(getactiveinputindices(m.model[i])), length(getactiveindices(m.model[i+1])), stage-allactives[i][batch])
+                                        end
                                     end
+                                    toadd = min(toadd, max_hiddens[i]-countactiveneurons(m.model[i]))
                                 end
                             end
-                            @show init, newindices
-                            push!(updates[i], xaxis[end])
-                            push!(allinittimes[i], inittime)
-                            push!(allinittimesCPU[i], inittimeCPU)
+
+                            if (trig) & (countactiveneurons(m.model[i]) < max_hiddens[i]) & (i > args["fix"]) & (i < lastfix) & (toadd > 0)
+                                inittimeCPU = @CPUelapsed begin
+                                    inittime = @myelapsed device begin 
+                                        copied = []
+                                        if device == gpu
+                                            GC.gc()
+                                            CUDA.reclaim()
+                                        end
+                                        if init == RANDOMIN #random in, zero out
+                                            newindices = getinactiveindices(m.model[i], toadd)
+                                            unmaskneuron(m, i, newindices, Neurogenesis.glorot_uniform, otherrng, true)
+                                            if i + 1 <= length(m.model)
+                                                unmaskoutputs(m.model[i+1], newindices, Neurogenesis.zero_init, otherrng, false)
+                                            end
+                                        elseif init == RANDOMOUT #zero in, random out
+                                            newindices = randomoutneuron(m, i, otherrng, toadd)
+                                        elseif init == GRADMAX   #zero in, directly max grad-norm out
+                                            if trig == GSVDC
+                                                newindices = gradmaxneuron(m, i, U, device, otherrng, toadd)
+                                            else
+                                                newindices = gradmaxneuron(m, i, x, y, auxloss, device, otherrng, toadd)
+                                            end
+                                        elseif init == NEST #gradient based in and out
+                                            if isa(m.model[i], Neurogenesis.NeuroVertexDense)
+                                                if trig == GSVDC
+                                                    newindices = nestneuron(m, i, cpu(gradi), 4.0f-1, otherrng, toadd)
+                                                else
+                                                    newindices = nestneuron(m, i, x, y, auxloss, 4.0f-1, device, otherrng, toadd)
+                                                end
+                                            else
+                                                newindices = nestconvneuron(m, i, (m, x, y) -> Flux.logitcrossentropy(m(x), y), x, y, tries[i]+toadd, device, otherrng, toadd)
+                                            end
+                                        elseif init == FIREFLY #copy+noise in, half copy out
+                                            newindices, copied = noisycopyneuron(m, i, (m, x, y) -> Flux.logitcrossentropy(m(x), y), x, y, tries[i]+toadd, args["eps"], 5.0f-1, device, otherrng, toadd)
+                                        elseif init == ORTHOGACT #guess+check max orthog-act in, zero out
+                                            if !isa(m.model[i], Neurogenesis.NeuroVertexDense)  #for speed
+                                                newindices = initneuron(m, i, tries[i]+toadd, xsdata, orthog, otherrng, toadd)
+                                            else
+                                                newindices = optorthogact(m, i, xsdata, tries[i]+toadd, 0, orthog, device, otherrng, toadd)
+                                            end
+                                        elseif init == ORTHOGWEIGHTS #directly max orthog-weights in, zero out
+                                            newindices = getinactiveindices(m.model[i], toadd)
+                                            unmaskneuron(m.model[i], newindices, Neurogenesis.orthogonal_init, otherrng, true)
+                                            if i + 1 <= length(m.model)
+                                                unmaskoutputs(m.model[i+1], newindices, Neurogenesis.zero_init, otherrng, false)
+                                            end
+                                        elseif (init == SOLVEORTHOGACT) #directly max orthog pre-act in, zero out
+                                            newindices = addorthogact(m, i, xsdata, tries[i]+toadd, orthog, otherrng, toadd) # length(getinactiveindices(m.model[1])
+                                        elseif init == OPTORTHOGACT #use gradient descent to find weights that optimize orthogonality of act
+                                            newindices = optorthogact(m, i, xsdata, floor(Int, tries[i]/10)+toadd, floor(Int, tries[i]/10), orthog, device, otherrng, toadd)
+                                        end
+                                    end
+                                end
+                                @show init, newindices
+                                push!(updates[i], xaxis[end])
+                                push!(allinittimes[i], inittime)
+                                push!(allinittimesCPU[i], inittimeCPU)
+                            end
                         end
+                        push!(alltrigtimes, trigtime)
+                        push!(alltrigtimesCPU, trigtimeCPU)
                     end
-                    push!(alltrigtimes, trigtime)
-                    push!(alltrigtimesCPU, trigtimeCPU)
                     batch += 1
                 end
                 BSON.@save joinpath(folder, "temp_logs.bson") args allloss allgradnorm allactives allcounts allscores allthresholds testaccs xaxis epoch allinittimesCPU allinittimes alltrigtimesCPU alltrigtimes

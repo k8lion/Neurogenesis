@@ -43,6 +43,7 @@ RELUSEP = "relusep"
 ORTHOGONALGAP = "orthogonalgap"
 inits = (RANDOMIN, ORTHOGACT, SOLVEORTHOGACT, OPTORTHOGACT, ORTHOGWEIGHTS, FIREFLY, RANDOMOUT, GRADMAX, NEST)
 triggers = (RANDOMTRIG, SVDACTS, SVDWEIGHTS, GSVDC, LINEAR, FASTLINEAR, STATIC, BATCHED, BIGSTATIC, SMALLSTATIC)
+statics = (STATIC, BIGSTATIC, SMALLSTATIC)
 datasets = (MNIST, SIM, CIFAR10, CIFAR100, CARTPOLE, ACROBOT)
 orthogs = (COUNTSVD, RELUSEP, ORTHOGONALGAP)
 
@@ -136,14 +137,14 @@ function getcifar100data(batchsize=64, dir=nothing, flatten=true, gpu=false, val
         xtrain = xtrain[repeat([:], ndims(xtrain) - 1)...,order]
         ytrain = ytrain[order]
         imgstrain = [xtrain[repeat([:], ndims(xtrain) - 1)...,i] for i in 1:totaltrain]
-        labelstrain = Matrix(Flux.onehotbatch([ytrain[i] for i in 1:totaltrain],0:9))
+        labelstrain = Matrix(Flux.onehotbatch([ytrain[i] for i in 1:totaltrain],0:99))
         trainbatches = [(cat(imgstrain[i]..., dims = ndims(xtrain)), labelstrain[:,i]) for i in partition(1:totaltrain, batchsize)]
         imgstest = [xtest[repeat([:], ndims(xtest) - 1)...,i] for i in 1:totaltest]
-        labelstest = Matrix(Flux.onehotbatch([ytest[i] for i in 1:totaltest],0:9))
+        labelstest = Matrix(Flux.onehotbatch([ytest[i] for i in 1:totaltest],0:99))
         testbatches = [(cat(imgstest[i]..., dims = ndims(xtest)), labelstest[:,i]) for i in partition(1:totaltest, batchsize)]
         return CuIterator(trainbatches), CuIterator(testbatches)
     else
-        ytrain, ytest = Flux.onehotbatch(ytrain, 0:9), Flux.onehotbatch(ytest, 0:9)
+        ytrain, ytest = Flux.onehotbatch(ytrain, 0:99), Flux.onehotbatch(ytest, 0:99)
         train_loader = Flux.Data.DataLoader((xtrain, ytrain), batchsize=batchsize, shuffle=true)
         test_loader = Flux.Data.DataLoader((xtest, ytest), batchsize=batchsize)
         return train_loader, test_loader
@@ -394,7 +395,7 @@ function parse_commandline()
         help = "use GPU"
         action = :store_true
         "--lr"
-        help = "learning rate, 3f-4 for MLP and 3f-2 for VGG"
+        help = "learning rate, defaults to 3f-4"
         arg_type = Float32
         default = -1f0
         "--SGD"
@@ -427,6 +428,9 @@ function parse_commandline()
         "--vgg"
         help = "use vgg architecture"
         action = :store_true
+        "--wrn"
+        help = "use wrn architecture"
+        action = :store_true
         "--staticwidth"
         help = "width of static layers (and max for static schedules), -1 is sdaptive to config"
         arg_type = Int
@@ -451,6 +455,10 @@ function parse_commandline()
         help = "maximum hidden layer width, -1 is # of features"
         arg_type = Int
         default = -1
+        "--skipscale"
+        help = "scale skip connections"
+        arg_type = Float32
+        default = 1f0
         "--initwidth"
         help = "initial hidden layer width"
         arg_type = Int
@@ -534,7 +542,7 @@ function parse_commandline()
         args["hidden"] = 4
         args["initwidth"] = 32
     end
-    if (args["svdthreshold"] < 0)
+    if (args["svdthreshold"] < 0) && !(args["vgg"] || args["wrn"])
         if (args["trigger"] == SVDACTS)
             args["svdthreshold"] = 0.97
         else
@@ -551,51 +559,56 @@ function parse_commandline()
         end
     end
 
+    if (args["staticwidth"] > args["maxwidth"]) && (args["maxwidth"] > 0) && (args["staticwidth"] > 0)
+        args["staticwidth"] = args["maxwidth"]
+    end
+
     if args["trigger"] == STATIC
         args["fix"] = args["hidden"]
     elseif args["trigger"] == BIGSTATIC
         args["fix"] = args["hidden"]
         args["staticwidth"] = args["maxwidth"]
-        args["initmultiplier"] = 2f0    
     elseif args["trigger"] == SMALLSTATIC
         args["fix"] = args["hidden"]
         args["staticwidth"] = args["initwidth"]
-        args["initmultiplier"] = 0.25f0
-    end
-
-    if (args["staticwidth"] > args["maxwidth"]) & (args["maxwidth"] > 0) & (args["staticwidth"] > 0)
-        args["staticwidth"] = args["maxwidth"]
     end
 
     args["ADAM"] = !args["SGD"]
 
-    if args["vgg"]
+    if args["vgg"] || args["wrn"]
         args["conv"] = true
-        args["hidden"] = 10
-        args["endpreset"] = 5f-1
+        args["vgg"] ? args["hidden"] = 10 : args["hidden"] = 4
+        if args["maxwidth"] < 0
+            args["vgg"] || args["intergrowth"] ? args["maxwidth"] = 2 : args["maxwidth"] = 6
+        end
+        args["endpreset"] = 25f-2
         if args["dataset"] == MNIST
             args["dataset"] = CIFAR10
         end
         if args["buffermult"] == 2
             args["buffermult"] = 0.25f0
         end
-        if args["initmultiplier"] == -1f0
-            if args["trigger"] == BIGSTATIC
-                args["initmultiplier"] = 2f0
-            elseif args["trigger"] == STATIC
-                args["initmultiplier"] = 1f0
+        if args["trigger"] == BIGSTATIC
+            args["initmultiplier"] = args["maxwidth"]*1f0
+        elseif args["trigger"] == STATIC
+            args["initmultiplier"] = 1f0
+        else
+            args["initmultiplier"] = 0.25f0
+        end
+        if (args["svdthreshold"] < 0)
+            if args["trigger"] == SVDACTS
+                args["svdthreshold"] = 0.9
             else
-                args["initmultiplier"] = 0.25f0
+                args["svdthreshold"] = 0.99
             end
         end
-        args["svdthreshold"] = 0.99
         args["cosine"] = true
     end
     if args["orthog"] == ORTHOGONALGAP
         args["svdinit"] = true
     end
     if args["lr"] < 0
-        args["lr"] = 3f-4
+        args["vgg"] ? args["lr"] = 3f-4 : args["lr"] = 3f-3
     end
     if !args["svdinit"] && !args["nosvdinit"]
         args["svdinit"] = true

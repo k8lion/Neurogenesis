@@ -10,6 +10,7 @@ using CPUTime
 include("utilities.jl")
 
 function ng(args)
+    #setup
     if args["gpu"] && CUDA.functional()
         device = gpu
     else
@@ -59,7 +60,7 @@ function ng(args)
             epochs = args["epochs"]
             init_hidden = args["initwidth"]
             buffer_multiplier = args["buffermult"]
-
+            #get dataset
             if args["dataset"] == MNIST
                 trainDL, testDL = getmnistdata(batchsize, datadir, !args["conv"], args["gpu"], args["hptune"], otherrng) |> device
                 features = 784
@@ -136,7 +137,7 @@ function ng(args)
             if args["conv"]
                 input = size(first(trainDL)[1])[1:3]
             end
-
+            #set up initial and max widths
             if !args["vgg"] && !args["wrn"]
                 init_hiddens = ones(Int, args["hidden"]) .* init_hidden
                 init_hiddens_ = init_hiddens
@@ -221,12 +222,12 @@ function ng(args)
             @show max_hiddens
             @show max_hidden
 
+            #initialize model
             if args["vgg"]
                 m = NeuroSearchSpaceVGG11(args["initmultiplier"], input, classes, tries, false, false, gmrelu)
                 [@show countactiveneurons(m.model[i]) for i in 1:length(max_hiddens)]
             elseif args["wrn"]
                 m = NeuroSearchSpaceWRN28(args["initmultiplier"], max_hiddens.+tries, input, classes, args["skipscale"], false, true, gmrelu)
-
             elseif args["conv"]
                 m = NeuroSearchSpace(max_hiddens .+ tries, init_hiddens_, input, classes, [(5, 5), (5, 5), (-1, -1), (-1, -1), (-1, -1)], args["bias"], gmrelu) |> f32
             else
@@ -236,6 +237,7 @@ function ng(args)
                 m = togpu(m)
             end
 
+            #setup loggers
             xs = Buffer(zeros(Float32, input..., 0)|> device, floor(Int, max_hidden * buffer_multiplier))
 
             xaxis = Array{Float32,1}(undef, 0)
@@ -253,7 +255,8 @@ function ng(args)
             alltrigtimesCPU = Array{Float32,1}(undef, 0)
 
             testaccs = zeros(Float32, 1)
-
+            
+            #initialize thresholds
             svd_thresholds = [args["svdthreshold"] for _ in 1:args["hidden"]]
             if trigger == SVDACTS
                 if device == cpu
@@ -301,16 +304,19 @@ function ng(args)
                     end
                     ps = params(m)
 
+                    #main training step
                     train_loss, back = Zygote.pullback(() -> Flux.logitcrossentropy(m(x, saveacts=saveacts), y), ps)
-
                     gs = back(one(train_loss))
                     Flux.Optimise.update!(opt, ps, gs)
 
                     push!(allloss, train_loss)
                     [push!(allactives[i], countactiveneurons(m.model[i])) for i in 1:length(max_hiddens)]
-                    if !(trigger in statics)
 
+                    #grow if not static network
+                    if !(trigger in statics)
                         push!(allcounts, countparams(m))
+
+                        #global trigger preparation before layer-by-layer computations
                         trigtimeCPU = @CPUelapsed begin
                             trigtime = @myelapsed device begin 
                                 if trigger == GSVDC
@@ -336,6 +342,8 @@ function ng(args)
                                 end
                             end
                         end
+
+                        #for each growable layer
                         for i in 1:length(max_hiddens)
                             trigtimeCPU += @CPUelapsed begin
                                 trigtime += @myelapsed device begin 
@@ -346,25 +354,30 @@ function ng(args)
                                         CUDA.reclaim()
                                     end
                                     if trigger == SVDACTS
+                                        #compute metric
                                         actives = getactiveindices(m.model[i])
                                         scorea = orthogscore(m.acts.currentacts[i], orthog, actives)
                                         push!(allscores[i], scorea)
                                         if args["svdinit"]
                                             svd_thresholds[i] = floor(Int, initial_orthos[i] * length(actives))
+                                            #update baseline if needed
                                             if (args["vgg"] || args["wrn"]) && scorea/length(actives)*args["svdthreshold"] > initial_orthos[i]
                                                 initial_orthos[i] = scorea/length(actives)*args["svdthreshold"]
                                             end
                                         else
                                             svd_thresholds[i] = floor(Int, args["svdthreshold"] * length(actives))
                                         end
-                                        push!(allthresholds[i], svd_thresholds[i]) 
+                                        push!(allthresholds[i], svd_thresholds[i])
+                                        #compute trigger 
                                         trig = (scorea > svd_thresholds[i])
                                         toadd = floor(Int, scorea - svd_thresholds[i])
                                     elseif trigger == SVDWEIGHTS
+                                        #compute metric
                                         scorew = countsvd(Wmasked(m.model[i], true, true, false, true, true))
                                         push!(allscores[i], scorew)
                                         if args["svdinit"]
                                             svd_thresholds[i] = floor(Int, initial_orthos[i] * length(getactiveindices(m.model[i])))
+                                            #update baseline if needed
                                             if (args["vgg"] || args["wrn"]) && scorew/length(getactiveindices(m.model[i]))*args["svdthreshold"] > initial_orthos[i]
                                                 initial_orthos[i] = scorew/length(getactiveindices(m.model[i]))*args["svdthreshold"]
                                             end
@@ -372,9 +385,11 @@ function ng(args)
                                             svd_thresholds[i] = floor(Int, args["svdthreshold"] * length(getactiveindices(m.model[i])))
                                         end
                                         push!(allthresholds[i], svd_thresholds[i])
+                                        #compute trigger
                                         trig = (scorew > svd_thresholds[i])
                                         toadd = floor(Int, scorew - svd_thresholds[i])
                                     elseif trigger == GSVDC
+                                        #compute score from pre-computed auxiliary gradient
                                         fanin = getactiveinputindices(m.model[i])
                                         fanout = getactiveindices(m.model[i+1])
                                         if ndims(grad[i]) == 2
@@ -387,6 +402,7 @@ function ng(args)
                                         push!(allscores[i], scorec)
                                         scoreg = sum(gradnorms[i])/2
                                         push!(allthresholds[i], scoreg)
+                                        #compute trigger
                                         trig = (scorec >= scoreg)
                                         toadd = min(sum(S .>= scoreg), size(U)[2])
                                         if device == gpu
@@ -401,6 +417,7 @@ function ng(args)
                                     elseif trigger == RANDOMTRIG
                                         trig = (rand(otherrng) > (xaxis[end] / epochs)) & (countactiveneurons(m.model[i]) < (xaxis[end] / epochs * max_hiddens[i]))
                                         toadd = 1
+                                    #pre-determined schedules
                                     elseif trigger == LINEAR
                                         trig = (allactives[i][batch] < (defaultstatic[i] - init_hiddens_[i]) * xaxis[end] / (epochs * args["endpreset"]) + init_hiddens_[i]) & (allactives[i][batch] < defaultstatic[i])
                                         toadd = 1
@@ -419,6 +436,7 @@ function ng(args)
                                 end
                             end
 
+                            #check if we can and should add
                             if (trig) & (countactiveneurons(m.model[i]) < max_hiddens[i]) & (i > args["fix"]) & (i < lastfix) & (toadd > 0)
                                 inittimeCPU = @CPUelapsed begin
                                     inittime = @myelapsed device begin 
@@ -483,11 +501,13 @@ function ng(args)
                     end
                     batch += 1
                 end
+                #log ongoing progress
                 BSON.@save joinpath(folder, "temp_logs.bson") args allloss allgradnorm allactives allcounts allscores allthresholds testaccs xaxis epoch allinittimesCPU allinittimes alltrigtimesCPU alltrigtimes
             end
         end
     end
     @show time, timeCPU
+    #test and save
     testaccs[end] = accuracy(m, testDL)
     BSON.@save joinpath(folder, "logs.bson") args allloss allgradnorm allactives allcounts allscores allthresholds testaccs xaxis time timeCPU allinittimesCPU allinittimes alltrigtimesCPU alltrigtimes
     @show allloss[end]

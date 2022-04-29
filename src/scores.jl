@@ -20,7 +20,6 @@ function meannorm(W::AbstractMatrix, fanin=true)
 end
 
 function meannorm(nv::NeuroVertex, fanin=true)
-    #@show size(Wmasked(nv, fanin, fanin, !fanin)), size(vecnorm(Wmasked(nv, fanin, fanin, !fanin), 2))
     return mean(vecnorm(Wmasked(nv, fanin, fanin, !fanin), 2))
 end
 
@@ -95,7 +94,6 @@ function orthogonalgap(H::AbstractMatrix)
     return norm(transpose(H)*H/norm(H)^2-cu(I(size(H)[2]))/size(H)[2])
 end
 
-#purposefully across neurons instead of samples...?
 function relusepscore(newacts::AbstractArray, curracts::AbstractArray)
     K = zeros(Float32, size(curracts)[2], size(curracts)[2])
     c_bin = binarize.(curracts)'
@@ -254,6 +252,9 @@ function orthogonalgapsum(newacts::AbstractArray, curracts::AbstractArray)
     return score
 end
 
+"""
+Route to correct scoring function
+"""
 function orthogscore(acts::AbstractArray, orthog::String, actives::AbstractVector)
     if ndims(acts) == 2
         activeacts = acts[actives, :]

@@ -14,7 +14,9 @@ using Random: GLOBAL_RNG, shuffle!
 using Base.Iterators: partition
 using CUDA
 
-
+"""
+Growable dense layer
+"""
 struct NeuroVertexDense
     layer::Dense 
     maskW::AbstractMatrix{Int} 
@@ -146,6 +148,9 @@ function scaleweights(m::NeuroVertexDense, fanin, fanout, factor::Real)
     m.layer.weight[fanin,fanout] .*= factor
 end
 
+"""
+Growable conv layer
+"""
 struct NeuroVertexConv
     layer::Conv 
     maskW::AbstractMatrix{Int} 
@@ -305,6 +310,9 @@ mutable struct ActivationsStore
     currentacts::Dict{Int,AbstractArray}
 end
 
+"""
+Growable group of residual blocks, such that all channels are tied and statistics are based on first layer of group
+"""
 struct NeuroVertexSequence
     layers::AbstractVector{NeuroVertexConv}
     skips::AbstractVector{Any}
@@ -686,9 +694,9 @@ function (m::NeuroVertexSequence)(aux::AbstractArray, x::AbstractArray, old_x::A
     return m.pool(x)
 end
 
-
-
-
+"""
+Growable model
+"""
 struct NeuroSearchSpace
     model::AbstractVector{Union{NeuroVertex,Chain}}
     acts::ActivationsStore

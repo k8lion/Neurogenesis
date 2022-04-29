@@ -13,6 +13,9 @@ using ChainRulesCore: add!!
 using ChainRules
 import ChainRules: svd_rev
 
+"""
+Needed for SVD differentation in NORTH-Opt
+"""
 function ChainRules.svd_rev(USV::CUDA.CUSOLVER.CuSVD{T}, Ū::AbstractZero, s̄::CuArray{T,1}, V̄::AbstractZero) where T
     U = USV.U
     Vt = USV.Vt
@@ -45,6 +48,9 @@ function glorot_uniform(fullins::Int, fullouts::Int, activeins::Int, activeouts:
     return (rand(rng, Float32, fullouts, fullins) .- 0.5f0 ) .* sqrt(24.0f0 / (sum(activeins) + sum(activeouts)))
 end
 
+"""
+NORTH-Weight
+"""
 function orthogonal_init(nv::NeuroVertex, neuron::Int, outs::Int, row::Bool = true, rng=GLOBAL_RNG)
     mat = Wmasked(nv, true, row, !row, false, true)
     weights = vec(glorot_uniform(nv, neuron, outs, row, rng))
@@ -80,7 +86,9 @@ function zero_init(fullins::Int, fullouts::Int, activeins::Int, activeouts::Int,
     return zeros(Float32, fullouts, fullins)
 end
 
-
+"""
+NORTH-Select (conv)
+"""
 function initneuron(m::NeuroSearchSpace, layer::Int, tries::Int, x::AbstractArray, orthog::String="countsvd", rng = GLOBAL_RNG, toadd::Int = 1)
     if layer > 1
         x = m(x, depth=layer-1)
@@ -120,7 +128,9 @@ function initneuron(m::NeuroSearchSpace, layer::Int, tries::Int, x::AbstractArra
     return tokeeps
 end
 
-
+"""
+NORTH-Select (dense) and NORTH-Opt
+"""
 function optorthogact(m::NeuroSearchSpace, layer::Int, x::AbstractArray, tries::Int = 1, steps::Int=1000, orthog::String="countsvd", device = "cpu", rng = GLOBAL_RNG, toadd::Int = 1)
     if orthog == "countsvd"
         sumscore = countsvdactsum
@@ -218,7 +228,9 @@ function optorthogact(m::NeuroSearchSpace, layer::Int, x::AbstractArray, tries::
     return newindices
 end
 
-
+"""
+NORTH-Pre
+"""
 function addorthogact(m::NeuroSearchSpace, layer::Int, x::AbstractArray, tries::Int = 1, orthog::String="countsvd", rng = GLOBAL_RNG, toadd::Int = 1)
     if isa(m.model[layer], NeuroVertexConv)
         return initneuron(m, layer, tries, x, orthog, rng)
@@ -269,6 +281,9 @@ function addorthogact(m::NeuroSearchSpace, layer::Int, x::AbstractArray, tries::
     return newindices[sortperm(scores)[1:toadd]]
 end
 
+"""
+Firefly adaptation
+"""
 function noisycopyneuron(m::NeuroSearchSpace, i::Int, lossf, x, y, tries::Int = 1, ϵ::Float32 = 1f-4, copyratio::Float32 = 5f-1, device = cpu, rng = GLOBAL_RNG, toadd::Int = 1)
     actives = getactiveindices(m.model[i])
     inputactives = getactiveinputindices(m.model[i])
@@ -354,6 +369,9 @@ function noisycopyneuron(m::NeuroSearchSpace, i::Int, lossf, x, y, tries::Int = 
     return newindices[tokeep], []
 end
 
+"""
+NeST (conv) adaptation
+"""
 function nestconvneuron(m::NeuroSearchSpace, i::Int, lossf, x, y, tries::Int = 1, device = cpu, rng = GLOBAL_RNG, toadd::Int = 1)
     oldW = copy(Wmasked(m.model[i], true, true, false, false, true))
     newindices = getinactiveindices(m.model[i],tries)
@@ -418,7 +436,9 @@ function auxgradpatches(grad::AbstractArray, device, outkernel=(3,3), stride=(1,
     return copy(flatten(output)')
 end
 
-
+"""
+GradMax adaptation (without precomputed gradient)
+"""
 function gradmaxneuron(m::NeuroSearchSpace, i::Int, x::AbstractArray, y::AbstractArray, lossf, device = cpu, rng = GLOBAL_RNG, toadd::Int = 1)
     grad, = gradient(auxw -> lossf(m,i,auxw,x,y), m.auxs[i]) 
     fanin = getactiveinputindices(m.model[i])
@@ -440,7 +460,9 @@ function gradmaxneuron(m::NeuroSearchSpace, i::Int, x::AbstractArray, y::Abstrac
     return newindices
 end
 
-
+"""
+GradMax adaptation (with precomputed gradient)
+"""
 function gradmaxneuron(m::NeuroSearchSpace, i::Int, Ugradfilt::AbstractMatrix, device = cpu, rng = GLOBAL_RNG, toadd::Int = 1)
     allweights = copy(transpose(Ugradfilt[:,1:toadd]))
     newindices = getinactiveindices(m.model[i], toadd)
@@ -449,7 +471,9 @@ function gradmaxneuron(m::NeuroSearchSpace, i::Int, Ugradfilt::AbstractMatrix, d
     return newindices
 end
 
-
+"""
+NeST (dense) adaptation (without precomputed gradient)
+"""
 function nestneuron(m::NeuroSearchSpace, i::Int, x, y, lossf, beta::Float32 = 1f-1, device = cpu, rng = GLOBAL_RNG, toadd::Int = 1)
     aux = device(zeros(Float32, size(m.model[i+1].layer.weight)[1], size(m.model[i].layer.weight)[2])) 
     grad, = gradient(auxw -> lossf(m,i,auxw,x,y), aux) 
@@ -476,7 +500,9 @@ function nestneuron(m::NeuroSearchSpace, i::Int, x, y, lossf, beta::Float32 = 1f
     return newindices
 end
 
-
+"""
+NeST (dense) adaptation (with precomputed gradient)
+"""
 function nestneuron(m::NeuroSearchSpace, i::Int, grad::AbstractMatrix, beta::Float32 = 1f-1, rng = GLOBAL_RNG, toadd::Int = 1)
     threshold = quantile(vec(abs.(grad)), beta)
     fanin = getactiveinputindices(m.model[i])
@@ -500,6 +526,9 @@ function nestneuron(m::NeuroSearchSpace, i::Int, grad::AbstractMatrix, beta::Flo
     return newindices
 end
 
+"""
+RandomOut
+"""
 function randomoutneuron(m::NeuroSearchSpace, i::Int, rng = GLOBAL_RNG, toadd::Int = 1)
     newindices = getinactiveindices(m.model[i],toadd)
     unmaskneuron(m.model[i], newindices, zero_init, rng)

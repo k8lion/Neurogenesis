@@ -1,6 +1,6 @@
 # Neurogenesis
 ## Code navigation
-The main script for training a growing neural network is found in `exp/runneurogenesis.jl`. This script accepts command line arguments, detailed in `exp/utilities.jl`, such as the trigger and initialization strategies, base architecture, dataset, and hyperparameters. Models and basic operations are defined in `src/models.jl`. Trigger scoring functions are defined in `src/scores.jl`. Initialization functions are defined `src/initializations.jl`.
+The main program for training a growing neural network is found in `exp/runneurogenesis.jl`. This script accepts command line arguments, detailed in `exp/utilities.jl`, such as the trigger and initialization strategies, base architecture, dataset, and hyperparameters. Models and basic operations are defined in `src/models.jl`. Trigger scoring functions are defined in `src/scores.jl`. Initialization functions are defined `src/initializations.jl`.
 
 ## Running experiments
 
@@ -37,7 +37,7 @@ julia --project exp/runneurogenesis.jl  \
  --seed 1 
 ```
 
-5. All output files of experiments that generated the plots in the paper are already stored in `outputs`. If you wish to rerun any or all of the full experiments, adapt the slurm-based scripts in `scripts` to your system and use the appropriate lines in `scripts/run_all.sh`. Note that `./scripts/figure4-5vggdyno.sh` requires a GPU.
+5. All output files of experiments that generated the plots in the paper are already stored in `outputs`. If you wish to rerun any or all of the full experiments, adapt the slurm-based scripts in `exp/scripts` to your system and use the appropriate lines in `exp/scripts/run_all.sh`. Note that `exp/scripts/figure4-5vggdyno.sh` requires a GPU.
 
 6. Generate all plots:
 ```

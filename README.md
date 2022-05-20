@@ -1,4 +1,8 @@
-# Neurogenesis
+# NORTH* Neurogenesis
+This repository accompagnies the our [work](https://openreview.net/forum?id=SWOg-arIg9) accepted at the 1st [AutoML](https://automl.cc) conference.
+
+Kaitlin Maile, Emmanuel Rachelson, Hervé Luga, Dennis G. Wilson, "When, where, and how to add new neurons to ANNs." AutoML Conference, 2022. 
+
 ## Code navigation
 The main program for training a growing neural network is found in `exp/runneurogenesis.jl`. This script accepts command line arguments, detailed in `exp/utilities.jl`, such as the trigger and initialization strategies, base architecture, dataset, and hyperparameters. Models and basic operations are defined in `src/models.jl`. Trigger scoring functions are defined in `src/scores.jl`. Initialization functions are defined `src/initializations.jl`.
 

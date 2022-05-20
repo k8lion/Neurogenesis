@@ -41,17 +41,7 @@ function ng(args)
             end
             datadir = args["datadir"]
             folder = joinpath(string("test/plots/ng", args["dataset"], args["vgg"] ? "vgg" : "", args["wrn"] ? "wrn" : ""), args["expdir"], string(trigger, "_", init), args["name"])
-            if isfile(joinpath(folder, "logs.bson")) & (args["expdir"] != "test")
-                return
-            end
             mkpath(folder)
-            mkpath(joinpath(folder, "code"))
-            if !isdir(joinpath(folder, "code/src"))
-                cp("src", joinpath(folder, "code/src"))
-                mkpath(joinpath(folder, "code/exp"))
-                cp("exp/runneurogenesis.jl", joinpath(folder, "code/exp/runneurogenesis.jl"))
-                cp("exp/utilities.jl", joinpath(folder, "code/exp/utilities.jl"))
-            end
             open(joinpath(folder, "args.txt"), "w") do io
                 for (k, v) in args
                     write(io, k, ": ", string(v), "\n")

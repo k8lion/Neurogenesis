@@ -1,4 +1,4 @@
-# NORTH* Neurogenesis
+# NORTH*: Neurogenesis driven by Neural Orthogonality 
 This repository accompagnies the our [work](https://openreview.net/forum?id=SWOg-arIg9) accepted at the 1st [AutoML](https://automl.cc) conference.
 
 Kaitlin Maile, Emmanuel Rachelson, Hervé Luga, Dennis G. Wilson, "When, where, and how to add new neurons to ANNs." AutoML Conference, 2022. 

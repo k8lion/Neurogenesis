@@ -3,6 +3,8 @@ This repository accompagnies our [work](https://openreview.net/attachment?id=SWO
 
 Kaitlin Maile, Emmanuel Rachelson, Hervé Luga, Dennis G. Wilson, "When, where, and how to add new neurons to ANNs." AutoML Conference, 2022. 
 
+This repository is implemented in Julia/Flux. For implementations of NORTH* metrics and growable architectures in Python/PyTorch, see [NeurOps](https://github.com/SuReLI/NeurOps).
+
 ## Code navigation
 The main program for training a growing neural network is found in `exp/runneurogenesis.jl`. This script accepts command line arguments, detailed in `exp/utilities.jl`, such as the trigger and initialization strategies, base architecture, dataset, and hyperparameters. Models and basic operations are defined in `src/models.jl`. Trigger scoring functions are defined in `src/scores.jl`. Initialization functions are defined `src/initializations.jl`.
 
